@@ -1,39 +1,12 @@
 import paddle.v2 as paddle
-import paddle.v2.dataset as dataset
 import os
 import gzip
+from paddle.v2.reader.creator import cloud_reader
+import paddle.v2.dataset.uci_housing as uci_housing
 
-#PaddleCloud cached the dataset on /pfs/${DATACENTER}/public/dataset/...
-dc = os.getenv("PADDLE_CLOUD_CURRENT_DATACENTER")
-dataset.common.DATA_HOME = "/pfs/%s/public/dataset" % dc
-
+etcd_ip = os.getenv("ETCD_IP")
+etcd_endpoint = "http://" + etcd_ip + ":" + "2379"
 trainer_id = int(os.getenv("PADDLE_INIT_TRAINER_ID"))
-trainer_count = int(os.getenv("PADDLE_INIT_NUM_GRADIENT_SERVERS"))
-
-# TODO(helin): remove this once paddle.v2.reader.creator.recordio is
-# fixed.
-def recordio(paths, buf_size=100):
-    """
-    Creates a data reader from given RecordIO file paths separated by ",",
-        glob pattern is supported.
-    :path: path of recordio files.
-    :returns: data reader of recordio files.
-    """
-
-    import recordio as rec
-    import paddle.v2.reader.decorator as dec
-    import cPickle as pickle
-
-    def reader():
-        f = rec.reader(paths)
-        while True:
-            r = f.read()
-            if r is None:
-                break
-            yield pickle.loads(r)
-        f.close()
-
-    return dec.buffered(reader, buf_size)
 
 def main():
     # init
@@ -52,7 +25,12 @@ def main():
     optimizer = paddle.optimizer.Momentum(momentum=0)
 
     trainer = paddle.trainer.SGD(
-        cost=cost, parameters=parameters, update_equation=optimizer, is_local=False)
+        cost=cost, 
+        parameters=parameters, 
+        update_equation=optimizer, 
+        is_local=False, 
+        pserver_spec=etcd_endpoint,
+        use_etcd=True)
 
     feeding = {'x': 0, 'y': 1}
 
@@ -65,7 +43,7 @@ def main():
 
         if isinstance(event, paddle.event.EndPass):
             result = trainer.test(
-                reader=paddle.batch(dataset.uci_housing.test(), batch_size=2),
+                reader=paddle.batch(uci_housing.test(), batch_size=2),
                 feeding=feeding)
             print "Test %d, Cost %f" % (event.pass_id, result.cost)
             if trainer_id == "0":
@@ -75,7 +53,9 @@ def main():
     # training
     trainer.train(
         reader=paddle.batch(
-            paddle.reader.shuffle(recordio("/pfs/dlnel/public/dataset/uci_housing/uci_housing_train*"), buf_size=500),
+            paddle.reader.shuffle(cloud_reader(
+                ["/pfs/dlnel/public/dataset/uci_housing/uci_housing_train-*"],
+                etcd_endpoint), buf_size=500),
             batch_size=2),
         feeding=feeding,
         event_handler=event_handler,
